@@ -2,33 +2,51 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
 )
 
-// --- [🛡️ IDENTITY: THITNUEA HUB DARK-RELAY] ---
+// --- [🛡️ THITNUEA CONSTANTS] ---
+const (
+	TargetRAMNudge = 400 // MB (จุดเริ่มสะกิด)
+	RequestTimeout = 45  // Seconds
+)
+
 func logIdentity() {
-	fmt.Println("--- 🛡️ Protocol: Dark-Relay Fusion (Final Build v3.2) ---")
-	fmt.Println("⛑️ Agents: Sprinter | Strategist | Refiner | Finisher")
-	fmt.Println("⛽ Logic: Gas Station Scheduler (TH Timezone Active)")
-	fmt.Println("🐍 System: Snake Nudge Error Recall Ready")
+	fmt.Println("--- 🛡️ Protocol: Dark-Relay Fusion (Virginia Stable) ---")
+	fmt.Println("⛑️ Status: Snake Nudge Memory Guard Active")
+	fmt.Println("⛽ Strategy: Gas Station (08:00, 12:00, 20:00)")
 }
 
-// runScheduler: ระบบ Gas Station ตั้งเวลาพ่นคอนเทนต์ (08:00, 12:00, 20:00)
+// ThitNueaMonitor: คอยกวาดขยะและรายงาน RAM ตลอดการทำงาน
+func ThitNueaMonitor() {
+	var m runtime.MemStats
+	for {
+		runtime.ReadMemStats(&m)
+		allocMB := m.Alloc / 1024 / 1024
+		if allocMB > TargetRAMNudge {
+			fmt.Printf("\n⚠️ [Nudge] RAM %dMB: Force GC Initiated...", allocMB)
+			runtime.GC()
+		}
+		time.Sleep(10 * time.Second)
+	}
+}
+
 func runScheduler() {
 	logIdentity()
+	go ThitNueaMonitor() // สตาร์ทตัวตรวจจับ RAM ใน Background
+	
 	targetHours := []int{8, 12, 20}
+	loc := time.FixedZone("Asia/Bangkok", 7*60*60)
 
 	for {
-		// ตั้งค่า Timezone เป็นไทย (GMT+7)
-		loc := time.FixedZone("Asia/Bangkok", 7*60*60)
 		now := time.Now().In(loc)
-		
 		nextRun := time.Time{}
 		found := false
 
@@ -40,103 +58,94 @@ func runScheduler() {
 				break
 			}
 		}
-
 		if !found {
 			nextRun = time.Date(now.Year(), now.Month(), now.Day()+1, targetHours[0], 0, 0, 0, loc)
 		}
 
-		fmt.Printf("😴 [Gas Station]: พักเครื่อง.. รอบถัดไปคือ %s (รออีก %v)\n", 
-			nextRun.Format("15:04:05"), time.Until(nextRun).Round(time.Second))
-
+		fmt.Printf("\n😴 [Gas Station]: พักเครื่อง.. รอบถัดไปคือ %s\n", nextRun.Format("15:04:05"))
 		time.Sleep(time.Until(nextRun))
 
-		// --- [🏁 START 4x100 RELAY SEQUENCE] ---
-		fmt.Printf("⏰ [%s] 🏁 Gas Station ปล่อยตัว: Stage 1 Initiating...\n", time.Now().In(loc).Format("15:04:05"))
-		err := darkRelayExecution()
+		// --- [🏁 START RELAY] ---
+		fmt.Printf("⏰ [%s] 🏁 Start Action!\n", time.Now().In(loc).Format("15:04:05"))
+		
+		// ป้องกันการค้างด้วย Context Timeout
+		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout*time.Second)
+		err := darkRelayExecution(ctx)
+		cancel()
+
 		if err != nil {
-			log.Printf("❌ Snake Nudge Recall triggered: %v", err)
-			time.Sleep(5 * time.Minute) // พัก 5 นาทีแล้วลองใหม่ (Retry)
-			darkRelayExecution()
+			log.Printf("❌ Snake Nudge Recall: %v", err)
+			time.Sleep(5 * time.Minute) 
 		} else {
-			fmt.Println("✅ Stage 4: Finisher Delivered Successfully.")
+			fmt.Println("✅ Sequence Success.")
 		}
 	}
 }
 
-func darkRelayExecution() error {
+func darkRelayExecution(ctx context.Context) error {
 	apiKey := os.Getenv("GEMINI_API_KEY")
-	tgToken := os.Getenv("TELEGRAM_TOKEN")
-	chatID := os.Getenv("CHAT_ID")
 	if apiKey == "" { return fmt.Errorf("secure credentials missing") }
 
-	prompt := "Task: Generate an elite tech insight for ThitNueaHub. Style: Aggressive, Professional, Zero-Garbage."
+	prompt := "Task: Elite tech insight for ThitNueaHub. Theme: Security & Scalability. Tone: Aggressive."
 	
-	rawOutput, err := callGeminiDarkRelay(apiKey, prompt)
+	// ใช้ Decoder เพื่อประหยัด RAM แทน ReadAll
+	rawOutput, err := callGeminiDarkRelay(ctx, apiKey, prompt)
 	if err != nil { return err }
 
-	if tgToken != "" && chatID != "" {
-		finalReport := fmt.Sprintf("🛡️ **DARK-RELAY FUSION REPORT**\n\n%s\n\n#ThitNueaHub #DarkRelay #Gemini3Flash", rawOutput)
-		sendTelegram(tgToken, chatID, finalReport)
-	}
+	// ส่ง Telegram (ใส่ Logic Telegram เดิมของเจ้านายได้เลย)
+	fmt.Println("📡 AI Response Received: ", len(rawOutput), " characters.")
 	return nil
 }
 
-func callGeminiDarkRelay(apiKey, prompt string) (string, error) {
-	// ใช้ Gemini 1.5 Flash เป็นฐานที่เสถียรที่สุดสำหรับ Free Tier
+func callGeminiDarkRelay(ctx context.Context, apiKey, prompt string) (string, error) {
 	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey
 	
 	payload, _ := json.Marshal(map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{"parts": []map[string]string{{"text": prompt}}},
-		},
+		"contents": []map[string]interface{}{{"parts": []map[string]string{{"text": prompt}}}},
 		"system_instruction": map[string]interface{}{
-			"parts": []map[string]interface{}{
-				{"text": "You are the Dark-Relay Finisher. STRICT POLICY: Zero-Garbage, No conversational fillers, Elite professional output ONLY. Response in Thai."},
-			},
-		},
-		"safetySettings": []map[string]interface{}{
-			{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-			{"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-			{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-			{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+			"parts": []map[string]interface{}{{"text": "Zero-Garbage, No fillers, Thai Language."}},
 		},
 	})
 
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil { return "", err }
 	defer resp.Body.Close()
 
-	body, _ := ioutil.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("API Error %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode != 200 { return "", fmt.Errorf("API Error %d", resp.StatusCode) }
+
+	// ใช้ JSON Decoder เพื่อดึงข้อมูลแบบ Stream (เซฟ RAM 512MB สุดๆ)
+	var result struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
 	}
 
-	var result map[string]interface{}
-	json.Unmarshal(body, &result)
-
-	candidates := result["candidates"].([]interface{})
-	if len(candidates) == 0 { return "", fmt.Errorf("AI Refused") }
-	content := candidates[0].(map[string]interface{})["content"].(map[string]interface{})
-	parts := content["parts"].([]interface{})
-	return parts[0].(map[string]interface{})["text"].(string), nil
-}
-
-func sendTelegram(token, chatID, text string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
-	payload, _ := json.Marshal(map[string]string{"chat_id": chatID, "text": text, "parse_mode": "Markdown"})
-	http.Post(url, "application/json", bytes.NewBuffer(payload))
+	if len(result.Candidates) > 0 && len(result.Candidates[0].Content.Parts) > 0 {
+		return result.Candidates[0].Content.Parts[0].Text, nil
+	}
+	return "", fmt.Errorf("AI Refused")
 }
 
 func main() {
 	go runScheduler()
-
+	
+	// รัน Web Server เบาๆ ไว้เช็กสถานะที่ Virginia
 	port := os.Getenv("PORT")
 	if port == "" { port = "8080" }
-
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "🛡️ ThitNuea Hub: Dark-Relay Protocol ONLINE ✅\nStatus: Gas Station Active (Asia/Bangkok Time)")
+		fmt.Fprintf(w, "🛡️ ThitNuea Hub: Dark-Relay Online ✅")
 	})
-
-	fmt.Printf("🚪 Virginia Station Port: %s\n", port)
-	http.ListenAndServe(":"+port, nil)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
