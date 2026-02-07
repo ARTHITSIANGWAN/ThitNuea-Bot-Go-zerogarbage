@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,154 +16,83 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/line/line-bot-sdk-go/v7/linebot"
+	_ "github.com/mattn/go-sqlite3" // คลังความจำระยะยาว
 )
 
-// --- CONFIGURATION ---
-const (
-	RequestTimeout = 60
-	ServerPort     = "10000" // Render Default
-)
-
-// --- GLOBAL VARIABLES (Thread-Safe) ---
+// --- GLOBAL VARIABLES ---
 var (
 	bot          *linebot.Client
-	audioCache   = make(map[string][]byte) // เก็บไฟล์เสียงใน RAM ชั่วคราว
-	cacheMutex   sync.RWMutex              // กุญแจล็อคป้องกัน RAM ตีกัน
-	myServerURL  string                    // URL ของ Server เรา (ไว้ทำลิงก์เสียง)
+	db           *sql.DB
+	audioCache   = make(map[string][]byte)
+	cacheMutex   sync.RWMutex
+	myServerURL  string
 )
 
-func main() {
-	// 1. Setup Environment
+func init() {
+	// 📖 1. เตรียมคลังสมอง SQLite
 	var err error
-	myServerURL = os.Getenv("SERVER_URL") // ต้องตั้งใน Render Env (เช่น https://thitnuea-app.onrender.com)
-	if myServerURL == "" { log.Fatal("⚠️ SETUP ERROR: กรุณาตั้งค่า SERVER_URL ใน Environment Variables") }
-
-	// 2. Initialize LINE Bot
-	bot, err = linebot.New(
-		os.Getenv("LINE_CHANNEL_SECRET"),
-		os.Getenv("LINE_CHANNEL_ACCESS_TOKEN"),
-	)
-	if err != nil { log.Fatalf("⚠️ LINE Init Failed: %v", err) }
-
-	// 3. Start Scheduler (Gas Station Logic)
-	go runScheduler()
-
-	// 4. Setup Routes (Emperor Gateway)
-	http.HandleFunc("/", handleDashboard)
-	http.HandleFunc("/webhook/line", handleLineWebhook)       // ทางด่วน LINE
-	http.HandleFunc("/webhook/messenger", handleFBWebhook)    // ทางด่วน Messenger
-	http.HandleFunc("/audio/", handleAudioServe)              // 🔊 ช่องทางเสิร์ฟไฟล์เสียง (แก้บอทใบ้)
-	http.HandleFunc("/nudge", handleNudge)
-
-	// 5. Start Server
-	port := os.Getenv("PORT")
-	if port == "" { port = ServerPort }
-	log.Printf("🤴 THITNUEA EMPEROR v3.5 READY | Port: %s | Server: %s", port, myServerURL)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	db, err = sql.Open("sqlite3", "./thitnuea_empire.db")
+	if err != nil { log.Fatal(err) }
+	db.Exec("CREATE TABLE IF NOT EXISTS knowledge (id INTEGER PRIMARY KEY, topic TEXT, insight TEXT, created_at DATETIME)")
 }
 
-// ==========================================
-// 🛡️ LINE WEBHOOK HANDLER
-// ==========================================
+func main() {
+	// 2. Setup Environment
+	myServerURL = os.Getenv("SERVER_URL")
+	bot, _ = linebot.New(os.Getenv("LINE_CHANNEL_SECRET"), os.Getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+
+	// 3. Routes (The Emperor Gateway)
+	http.HandleFunc("/", handleDashboard)
+	http.HandleFunc("/webhook/line", handleLineWebhook)
+	http.HandleFunc("/audio/", handleAudioServe)
+
+	port := os.Getenv("PORT")
+	if port == "" { port = "10000" }
+	log.Printf("🤴 THITNUEA EMPEROR v4.0 [FINAL] | Port: %s", port)
+	http.ListenAndServe(":"+port, nil)
+}
+
+// 🛡️ LINE WEBHOOK (พลายแก้ว 🏍️ รับงาน)
 func handleLineWebhook(w http.ResponseWriter, r *http.Request) {
 	events, err := bot.ParseRequest(r)
-	if err != nil {
-		if err == linebot.ErrInvalidSignature { w.WriteHeader(400) } else { w.WriteHeader(500) }
-		return
-	}
+	if err != nil { return }
 
 	for _, event := range events {
 		if event.Type == linebot.EventTypeMessage {
-			switch message := event.Message.(type) {
-			case *linebot.TextMessage:
-				go processLineMessage(event.ReplyToken, message.Text) // รันแยก Thread (Go Routine) เพื่อความไว
+			if message, ok := event.Message.(*linebot.TextMessage); ok {
+				go processEmperorLogic(event.ReplyToken, message.Text)
 			}
 		}
 	}
 	w.WriteHeader(200)
 }
 
-func processLineMessage(replyToken, userText string) {
+func processEmperorLogic(replyToken, userText string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	// 1. ถาม Gemini
+	// --- 🧠 STEP 1: ถามสมอง AI (Gemini) ---
 	aiText := askGemini(ctx, userText)
 
-	// 2. สร้างเสียง (ElevenLabs)
+	// --- 📖 STEP 2: บันทึกลงคลังความจำ SQLite ---
+	db.Exec("INSERT INTO knowledge (topic, insight, created_at) VALUES (?, ?, ?)", "User_Talk", userText+" -> "+aiText, time.Now())
+
+	// --- 🔊 STEP 3: สร้างเสียง (ElevenLabs) ---
 	audioID, err := generateVoice(aiText)
-	
-	// 3. ตอบกลับ (ถ้าสร้างเสียงได้ ส่งเสียงด้วย / ถ้าไม่ได้ ส่งแค่ข้อความ)
+
+	// --- 🏁 STEP 4: ตอบกลับแบบคอมโบ (ข้อความ + เสียง) ---
 	if err == nil {
 		audioURL := fmt.Sprintf("%s/audio/%s.mp3", myServerURL, audioID)
-		duration := 10000 // สมมติ 10 วิ (ElevenLabs ไม่บอก duration ต้องกะเอา หรือใช้ ffmpeg เช็ค)
-		if _, err := bot.ReplyMessage(
-			replyToken,
+		bot.ReplyMessage(replyToken, 
 			linebot.NewTextMessage(aiText),
-			linebot.NewAudioMessage(audioURL, duration),
-		).Do(); err != nil {
-			log.Printf("❌ Reply Error: %v", err)
-		}
+			linebot.NewAudioMessage(audioURL, 15000), // 15 วินาที
+		).Do()
 	} else {
 		bot.ReplyMessage(replyToken, linebot.NewTextMessage(aiText)).Do()
 	}
 }
 
-// ==========================================
-// 🛡️ FACEBOOK MESSENGER WEBHOOK HANDLER
-// ==========================================
-func handleFBWebhook(w http.ResponseWriter, r *http.Request) {
-	// A. Verification Request (ตอนเชื่อมต่อครั้งแรก)
-	if r.Method == "GET" {
-		verifyToken := os.Getenv("FB_VERIFY_TOKEN")
-		if r.URL.Query().Get("hub.verify_token") == verifyToken {
-			fmt.Fprintf(w, r.URL.Query().Get("hub.challenge"))
-			return
-		}
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-
-	// B. Message Handling (ตอนมีข้อความเข้า)
-	var payload struct {
-		Entry []struct {
-			Messaging []struct {
-				Sender struct{ ID string `json:"id"` } `json:"sender"`
-				Message struct{ Text string `json:"text"` } `json:"message"`
-			} `json:"messaging"`
-		} `json:"entry"`
-	}
-	
-	if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
-		if len(payload.Entry) > 0 && len(payload.Entry[0].Messaging) > 0 {
-			event := payload.Entry[0].Messaging[0]
-			go processFBMessage(event.Sender.ID, event.Message.Text)
-		}
-	}
-	w.WriteHeader(200)
-}
-
-func processFBMessage(senderID, text string) {
-	if text == "" { return }
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	
-	ans := askGemini(ctx, text)
-	sendFBMessage(senderID, ans)
-}
-
-func sendFBMessage(recipientID, text string) {
-	url := "https://graph.facebook.com/v18.0/me/messages?access_token=" + os.Getenv("FB_PAGE_ACCESS_TOKEN")
-	body, _ := json.Marshal(map[string]interface{}{
-		"recipient": map[string]string{"id": recipientID},
-		"message":   map[string]string{"text": text},
-	})
-	http.Post(url, "application/json", bytes.NewBuffer(body))
-}
-
-// ==========================================
-// 🧠 AI & VOICE ENGINE (THE CORE)
-// ==========================================
+// 🧠 AI ENGINE
 func askGemini(ctx context.Context, prompt string) string {
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + apiKey
@@ -173,7 +100,7 @@ func askGemini(ctx context.Context, prompt string) string {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"contents": []map[string]interface{}{{"parts": []map[string]interface{}{{"text": prompt}}}},
 		"system_instruction": map[string]interface{}{
-			"parts": []map[string]interface{}{{"text": "คุณคือ ThitNuea Emperor ตอบสั้น กระชับ ดุดัน และจริงใจ"}},
+			"parts": []map[string]interface{}{{"text": "คุณคือ ThitNuea Emperor วิเคราะห์แบบมนุษย์ มีรอยยิ้ม ตอบดุดัน ทรงพลัง"}},
 		},
 	})
 
@@ -182,7 +109,7 @@ func askGemini(ctx context.Context, prompt string) string {
 	
 	client := &http.Client{}
 	resp, err := client.Do(req)
-	if err != nil { return "ระบบสื่อสารผิดพลาด" }
+	if err != nil { return "ระบบสื่อสารขัดข้อง" }
 	defer resp.Body.Close()
 
 	var data struct {
@@ -192,20 +119,18 @@ func askGemini(ctx context.Context, prompt string) string {
 	}
 	json.NewDecoder(resp.Body).Decode(&data)
 	if len(data.Candidates) > 0 { return data.Candidates[0].Content.Parts[0].Text }
-	return "ขัดข้องทางเทคนิค"
+	return "จักรพรรดิกำลังใช้ความคิด..."
 }
 
+// 🔊 VOICE ENGINE (ElevenLabs + RAM Cache)
 func generateVoice(text string) (string, error) {
 	apiKey := os.Getenv("ELEVENLABS_API_KEY")
-	if apiKey == "" { return "", fmt.Errorf("no key") }
-	
-	voiceID := "ErXw6udqS8tO90962vF" // ใส่ ID เสียงที่ต้องการ
+	voiceID := "ErXw6udqS8tO90962vF" // ใส่ ID เสียงของทีมงาน
 	url := "https://api.elevenlabs.io/v1/text-to-speech/" + voiceID
 	
 	payload, _ := json.Marshal(map[string]interface{}{
 		"text": text,
 		"model_id": "eleven_multilingual_v2",
-		"voice_settings": map[string]float64{"stability": 0.5, "similarity_boost": 0.8},
 	})
 
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(payload))
@@ -217,14 +142,13 @@ func generateVoice(text string) (string, error) {
 	defer resp.Body.Close()
 
 	voiceData, _ := io.ReadAll(resp.Body)
-	
-	// เก็บลง RAM Cache
 	audioID := uuid.New().String()
+
 	cacheMutex.Lock()
 	audioCache[audioID] = voiceData
 	cacheMutex.Unlock()
 
-	// ตั้งเวลาลบไฟล์ทิ้งใน 5 นาที (Zero-Garbage)
+	// Zero-Garbage: ลบไฟล์เสียงใน 5 นาที
 	go func() {
 		time.Sleep(5 * time.Minute)
 		cacheMutex.Lock()
@@ -235,31 +159,21 @@ func generateVoice(text string) (string, error) {
 	return audioID, nil
 }
 
-// เสิร์ฟไฟล์เสียงจาก RAM
 func handleAudioServe(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Path[len("/audio/"):] // ตัดคำว่า /audio/ ออกเหลือแค่ ID
-	id = id[:len(id)-4] // ตัด .mp3 ออก
+	id := r.URL.Path[len("/audio/"):]
+	id = id[:len(id)-4] // ลบ .mp3
 
 	cacheMutex.RLock()
 	data, exists := audioCache[id]
 	cacheMutex.RUnlock()
 
-	if !exists {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
+	if !exists { w.WriteHeader(404); return }
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Write(data)
 }
 
-// ==========================================
-// 📟 DASHBOARD & UTILS
-// ==========================================
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	fmt.Fprintf(w, "<html><body style='background:black;color:#0f0'><h1>THITNUEA EMPEROR ACTIVE</h1><p>RAM: %d MB</p><p>Audio Cache: %d files</p></body></html>", m.Alloc/1024/1024, len(audioCache))
+	fmt.Fprintf(w, "<html><body style='background:black;color:#0f0'><h1>🛡️ THITNUEA EMPIRE v4.0 ACTIVE</h1><p>RAM Usage: %d MB</p></body></html>", m.Alloc/1024/1024)
 }
-
-func handleNudge(w http.ResponseWriter, r *http.Request) { /* ... Logic เดิม ... */ }
-func runScheduler() { /* ... Logic เดิม ... */ }
