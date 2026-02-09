@@ -1,4 +1,4 @@
-package main
+package main // แก้เป็นตัวพิมพ์เล็กแล้วครับเจ้านาย!
 
 import (
 	"bytes"
@@ -29,76 +29,109 @@ var (
 
 func init() {
 	var err error
+	// สร้างโฟลเดอร์ data เพื่อเก็บ DB ให้ปลอดภัยขึ้น (ถ้ามี)
 	db, err = sql.Open("sqlite3", "./thitnuea_empire.db")
-	if err != nil { log.Fatal(err) }
+	if err != nil {
+		log.Fatal("❌ DB Error:", err)
+	}
 	db.Exec("CREATE TABLE IF NOT EXISTS knowledge (id INTEGER PRIMARY KEY, topic TEXT, insight TEXT, created_at DATETIME)")
 }
 
 func main() {
 	myServerURL = os.Getenv("SERVER_URL")
-	bot, _ = linebot.New(os.Getenv("LINE_CHANNEL_SECRET"), os.Getenv("LINE_CHANNEL_ACCESS_TOKEN"))
+	
+	// ป้องกันบอท Panic ถ้าลืมใส่คีย์
+	secret := os.Getenv("LINE_CHANNEL_SECRET")
+	token := os.Getenv("LINE_CHANNEL_ACCESS_TOKEN")
+	
+	var err error
+	bot, err = linebot.New(secret, token)
+	if err != nil {
+		log.Printf("⚠️ LINE Bot Init Warning: %v", err)
+	}
 
 	http.HandleFunc("/", handleDashboard)
 	http.HandleFunc("/webhook/line", handleLineWebhook)
 	http.HandleFunc("/audio/", handleAudioServe)
 
 	port := os.Getenv("PORT")
-	if port == "" { port = "10000" }
-	log.Printf("🤴 THITNUEA EMPEROR v4.0 [GEMINI 3 READY] | Port: %s", port)
-	http.ListenAndServe(":"+port, nil)
+	if port == "" {
+		port = "10000"
+	}
+	log.Printf("🤴 THITNUEA EMPEROR v4.1 [FIXED & READY] | Port: %s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func handleLineWebhook(w http.ResponseWriter, r *http.Request) {
+	if bot == nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	events, err := bot.ParseRequest(r)
-	if err != nil { return }
+	if err != nil {
+		if err == linebot.ErrInvalidSignature {
+			w.WriteHeader(http.StatusBadRequest)
+		} else {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		return
+	}
 	for _, event := range events {
 		if event.Type == linebot.EventTypeMessage {
 			if message, ok := event.Message.(*linebot.TextMessage); ok {
+				// ส่งเข้าประมวลผลแยก Thread เพื่อความเร็ว
 				go processEmperorLogic(event.ReplyToken, message.Text)
 			}
 		}
 	}
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 }
 
 func processEmperorLogic(replyToken, userText string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second) // เพิ่มเวลาให้ Gemini 3 คิด
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
 
 	aiText := askGemini(ctx, userText)
-	db.Exec("INSERT INTO knowledge (topic, insight, created_at) VALUES (?, ?, ?)", "User_Talk", userText+" -> "+aiText, time.Now())
+	
+	// บันทึกลงคลังความรู้จักรวรรดิ
+	_, _ = db.Exec("INSERT INTO knowledge (topic, insight, created_at) VALUES (?, ?, ?)", "User_Talk", userText+" -> "+aiText, time.Now())
 
 	audioID, err := generateVoice(aiText)
-	if err == nil {
+	if err == nil && myServerURL != "" {
 		audioURL := fmt.Sprintf("%s/audio/%s.mp3", myServerURL, audioID)
-		bot.ReplyMessage(replyToken, 
+		_, _ = bot.ReplyMessage(replyToken, 
 			linebot.NewTextMessage(aiText),
 			linebot.NewAudioMessage(audioURL, 15000),
 		).Do()
 	} else {
-		bot.ReplyMessage(replyToken, linebot.NewTextMessage(aiText)).Do()
+		_, _ = bot.ReplyMessage(replyToken, linebot.NewTextMessage(aiText)).Do()
 	}
 }
 
-// 🧠 AI ENGINE: UPGRADED TO GEMINI 3 (No More Red Lines!)
 func askGemini(ctx context.Context, prompt string) string {
 	apiKey := os.Getenv("GEMINI_API_KEY")
-	// ใช้ gemini-3-flash-preview ตามคู่มือล่าสุด 2026
+	if apiKey == "" { return "เจ้านายลืมวางกุญแจ GEMINI_API_KEY ครับ!" }
+
+	// ใช้โมเดลล่าสุดตามที่เจ้านายเลือก
 	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=" + apiKey
 	
 	payload := map[string]interface{}{
 		"contents": []map[string]interface{}{
-			{"parts": []map[string]interface{}{{"text": prompt}}},
+			{
+				"parts": []map[string]interface{}{
+					{"text": prompt},
+				},
+			},
 		},
 		"system_instruction": map[string]interface{}{
-			"parts": []map[string]interface{}{{"text": "คุณคือ ThitNuea Emperor วิเคราะห์แบบมนุษย์ ตอบดุดัน ทรงพลัง ไร้ขยะ"}},
+			"parts": []map[string]interface{}{
+				{"text": "คุณคือ ThitNuea Emperor AI ผู้ปกครองจักรวรรดิ คุยแบบมนุษย์ ทรงพลัง ดุดัน และประหยัดถ้อยคำ"},
+			},
 		},
 		"generationConfig": map[string]interface{}{
-			"temperature": 1.0, // มาตรฐาน Gemini 3
-			"topK":        40,
-		},
-		"thinkingConfig": map[string]interface{}{
-			"thinking_level": "high", // ปล่อยให้พลายทองโชว์กึ๋น
+			"temperature": 0.9,
 		},
 	}
 
@@ -109,37 +142,45 @@ func askGemini(ctx context.Context, prompt string) string {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil { 
-		log.Printf("🐍 Snake Nudge: Connection Error")
-		return "จักรพรรดิกำลังเดินทางผ่านมิติคอนเนคชั่น..." 
+		return "มิติเชื่อมต่อขัดข้อง: " + err.Error()
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	
+	// แกะโครงสร้าง JSON ของ Gemini 3 แบบละเอียด
 	var res struct {
 		Candidates []struct {
 			Content struct {
-				Parts []map[string]interface{} `json:"parts"`
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
 			} `json:"content"`
 		} `json:"candidates"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
 	}
 
 	if err := json.Unmarshal(bodyBytes, &res); err != nil {
-		return "พลายแก้วกำลังแกะรหัสคำตอบ... (Unmarshal Error)"
+		return "พลายแก้วอ่านลายมือ Gemini 3 ไม่ค่อยออกครับ..."
+	}
+
+	if res.Error.Message != "" {
+		return "Gemini แจ้งว่า: " + res.Error.Message
 	}
 
 	if len(res.Candidates) > 0 && len(res.Candidates[0].Content.Parts) > 0 {
-		// ดึง Text ออกมาอย่างปลอดภัย
-		if text, ok := res.Candidates[0].Content.Parts[0]["text"].(string); ok {
-			return text
-		}
+		return res.Candidates[0].Content.Parts[0].Text
 	}
 	
-	return "จักรพรรดิกำลังใช้ลายเซ็นความคิดสำรอง..."
+	return "จักรพรรดิใช้ความเงียบสยบความเคลื่อนไหว... (ไม่มีคำตอบ)"
 }
 
 func generateVoice(text string) (string, error) {
 	apiKey := os.Getenv("ELEVENLABS_API_KEY")
+	if apiKey == "" { return "", fmt.Errorf("no key") }
+	
 	voiceID := "ErXw6udqS8tO90962vF"
 	url := "https://api.elevenlabs.io/v1/text-to-speech/" + voiceID
 	
@@ -163,6 +204,7 @@ func generateVoice(text string) (string, error) {
 	audioCache[audioID] = voiceData
 	cacheMutex.Unlock()
 
+	// ลบไฟล์เสียงหลังผ่านไป 5 นาทีเพื่อประหยัด RAM
 	go func() {
 		time.Sleep(5 * time.Minute)
 		cacheMutex.Lock()
@@ -175,11 +217,14 @@ func generateVoice(text string) (string, error) {
 func handleAudioServe(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path[len("/audio/"):]
 	if len(path) < 4 { return }
-	id := path[:len(path)-4]
+	id := path[:len(path)-4] // ตัด .mp3 ออก
 	cacheMutex.RLock()
 	data, exists := audioCache[id]
 	cacheMutex.RUnlock()
-	if !exists { w.WriteHeader(404); return }
+	if !exists { 
+		w.WriteHeader(404)
+		return 
+	}
 	w.Header().Set("Content-Type", "audio/mpeg")
 	w.Write(data)
 }
@@ -187,5 +232,13 @@ func handleAudioServe(w http.ResponseWriter, r *http.Request) {
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	fmt.Fprintf(w, "<html><body style='background:black;color:#0f0'><h1>🛡️ THITNUEA EMPIRE v4.0 ACTIVE [3.0 READY]</h1><p>RAM Usage: %d MB</p></body></html>", m.Alloc/1024/1024)
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, "<html><body style='background:#0a0a0a;color:#00ff00;font-family:monospace;padding:50px;'>"+
+		"<h1>🛡️ THITNUEA EMPIRE v4.1</h1>"+
+		"<h3>STATUS: <span style='color:white'>ACTIVE [GEMINI 3.0]</span></h3>"+
+		"<p>RAM USAGE: %d MB</p>"+
+		"<p>SERVER TIME: %s</p>"+
+		"<hr style='border:1px solid #333'>"+
+		"<p>เพราะความสำเร็จคือรอยยิ้มของทีมงาน ThitNueaHub</p>"+
+		"</body></html>", m.Alloc/1024/1024, time.Now().Format(time.RFC822))
 }
