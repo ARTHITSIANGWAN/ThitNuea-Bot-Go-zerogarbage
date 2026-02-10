@@ -1,14 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -19,8 +16,6 @@ import (
 // --- 1. ตั้งค่าจักรวรรดิ ---
 const (
 	PaypalLink      = "https://paypal.me/arthitsiangwan" // 💎 ท่อลำเลียงทรัพย์
-	AgentPhlaiThong = "PHLAI_THONG_GO"
-	AgentKaewta     = "KAEWTA_PYTHON"
 )
 
 var (
@@ -42,7 +37,9 @@ func main() {
 	// Route สำหรับ Webhook และ Dashboard
 	http.HandleFunc("/", handleDashboard)
 	http.HandleFunc("/webhook/line", handleLineWebhook) // ท่อหลัก LINE
-	http.HandleFunc("/command", handleEmperorCommand)   // ท่อสั่งการหลังบ้าน
+	
+	// หมายเหตุ: ตัด /command ออกชั่วคราวเพื่อให้ผ่าน Build ก่อน
+	// http.HandleFunc("/command", handleEmperorCommand)   
 
 	port := os.Getenv("PORT")
 	if port == "" { port = "10000" }
@@ -67,9 +64,8 @@ func handleLineWebhook(w http.ResponseWriter, r *http.Request) {
 					go logToVault("Money_Opportunity", "User สนใจเปย์: "+userMsg)
 					replyFlexPayment(event.ReplyToken)
 				} else {
-					// 🧠 ถ้าไม่ใช่เรื่องเงิน -> ส่งให้ AI (แก้วตา/น้ำอิง) ทำงานต่อ
-					// ตรงนี้เจ้านายสามารถใส่ Logic เรียก Python หรือ Gemini ได้เหมือนเดิม
-					go processAIResponse(event.ReplyToken, userMsg)
+					// ตอบกลับปกติ
+					replyText(event.ReplyToken, "💎 แก้วตา: รับทราบค่ะ! ขอบคุณที่ทักทายจักรวรรดิ ThitNueaHub นะคะ")
 				}
 			}
 		}
@@ -87,7 +83,7 @@ func isMoneyKeyword(text string) bool {
 	return false
 }
 
-// ส่ง Flex Message แบบสวยงามดูแพง (ดีกว่า Text ธรรมดา)
+// ส่ง Flex Message แบบสวยงามดูแพง
 func replyFlexPayment(replyToken string) {
 	// JSON Flex Message: การ์ดเชิญชวนแบบ Premium
 	flexJSON := fmt.Sprintf(`{
@@ -142,21 +138,10 @@ func replyText(token, text string) {
 	bot.ReplyMessage(token, linebot.NewTextMessage(text)).Do()
 }
 
-// จำลองการตอบกลับ AI (ใส่ Logic เชื่อม Python ตรงนี้ได้)
-func processAIResponse(token, text string) {
-	// ตัวอย่าง: ส่ง Text กลับไปก่อน (เจ้านายเอา Code Python มาเสียบตรงนี้ได้เลย)
-	replyText(token, "🤖 แก้วตารับทราบ: "+text) 
-}
-
 // --- 4. ระบบหลังบ้าน (Dashboard & DB) ---
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "<h1>💎 THITNUEA MONEY HUB IS ACTIVE</h1><h3>Status: Ready to Receive Wealth</h3>")
-}
-
-func handleEmperorCommand(w http.ResponseWriter, r *http.Request) {
-	// ... (Logic รับคำสั่ง JSON เหมือนเดิม) ...
-	w.Write([]byte("Command Received"))
 }
 
 func initEmpireVault() {
